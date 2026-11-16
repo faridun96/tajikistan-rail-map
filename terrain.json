@@ -1,0 +1,10 @@
+{
+ "width": 1842,
+ "height": 1410,
+ "xMin": -368.454,
+ "zMin": -281.953,
+ "kmPerPx": 0.4,
+ "maxMeters": 7679,
+ "encoding": "meters = R*256 + G",
+ "source": "AWS Terrain Tiles (Mapzen/Tilezen, Terrarium), zoom 9"
+}

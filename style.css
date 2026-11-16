@@ -14,7 +14,7 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
-  font-family: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
 button { font: inherit; color: inherit; }
 
 #scene { position: fixed; inset: 0; }
@@ -37,8 +37,8 @@ button { font: inherit; color: inherit; }
 .title-card { padding: 14px 18px 14px; flex: none; }
 .eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
 h1 { margin: 4px 0 10px; font-size: 20px; line-height: 1.2; font-weight: 800; letter-spacing: -.01em; }
-.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.stat b { display: block; font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.stats { display: grid; grid-template-columns: repeat(4, auto); justify-content: space-between; gap: 8px; }
+.stat b { display: block; font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .stat span { font-size: 11px; color: var(--muted); }
 
 /* ---------- Легенда ---------- */
@@ -154,3 +154,19 @@ h1 { margin: 4px 0 10px; font-size: 20px; line-height: 1.2; font-weight: 800; le
   .hud { left: auto; right: 14px; bottom: auto; top: 128px; flex-direction: column-reverse; align-items: flex-end; }
   .hint { display: none; }
 }
+
+/* ---------- Реальная карта: доп. элементы ---------- */
+.ln-branches { margin-top: 5px; display: grid; gap: 2px; }
+.ln-branches div { font-size: 11px; color: var(--faint); line-height: 1.3; }
+#lines li { align-items: start; }
+#lines li .swatch { margin-top: 7px; }
+.k-tj { height: 3px !important; width: 16px !important; border-radius: 2px !important; background: #ff7d8c; }
+.k-foreign { height: 0 !important; width: 16px !important; border-radius: 0 !important; border-top: 2px dashed #9aa6bd; }
+.geo-label { white-space: nowrap; pointer-events: none; transition: opacity .4s; text-transform: uppercase; font-weight: 800; text-shadow: 0 0 10px #04070d, 0 0 4px #04070d; }
+.geo-label.country { font-size: 15px; letter-spacing: .5em; color: rgba(190, 200, 225, .42); }
+.geo-label.region { font-size: 11px; letter-spacing: .35em; color: rgba(140, 190, 240, .5); }
+.geo-label.foreign { font-size: 11px; letter-spacing: .02em; text-transform: none; font-weight: 600; font-style: italic; color: #9aa6bd; }
+.loader { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; color: var(--muted); font-size: 14px; background: var(--bg); transition: opacity .6s; }
+.loader.gone { opacity: 0; pointer-events: none; }
+.credits { position: fixed; z-index: 3; right: 18px; bottom: 66px; font-size: 10.5px; color: var(--faint); text-shadow: 0 1px 3px #000; pointer-events: none; }
+@media (max-width: 760px) { .credits { display: none; } }

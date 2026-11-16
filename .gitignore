@@ -7,3 +7,5 @@ tools/node_modules/
 *.bak
 # локальные настройки
 .claude/
+# кэш скачанных тайлов высот и данных OSM
+tools/cache/

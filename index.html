@@ -6,7 +6,8 @@
   <title>Железные дороги Таджикистана — 3D</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="style.css" />
   <script type="importmap">
     {
@@ -19,10 +20,11 @@
 </head>
 <body>
   <div id="scene"></div>
+  <div class="loader" id="loader">Загрузка рельефа…</div>
 
   <div class="left-col">
   <header class="panel title-card">
-    <div class="eyebrow">Интерактивная 3D-схема</div>
+    <div class="eyebrow">3D-карта · реальный рельеф</div>
     <h1>Железные дороги Таджикистана</h1>
     <div class="stats" id="stats"></div>
   </header>
@@ -43,6 +45,8 @@
       <div><i class="k-junction"></i>Узловая</div>
       <div><i class="k-border"></i>Сархад (граница)</div>
       <div><i class="k-train"></i>Поезд (анимация)</div>
+      <div><i class="k-tj"></i>Граница Таджикистана</div>
+      <div><i class="k-foreign"></i>Путь за границей</div>
     </div>
   </aside>
   </div>
@@ -68,6 +72,7 @@
       <button data-view="3d">3D</button>
       <button data-view="top">Сверху</button>
       <button data-view="reset">Вся сеть</button>
+      <button data-view="country">Вся страна</button>
     </div>
   </div>
 
@@ -78,8 +83,15 @@
 
   <div class="hint" id="hint">Перетаскивание — сдвиг · Правая кнопка — поворот · Колесо — масштаб · Клик по станции — подробности</div>
   <div class="tooltip" id="tooltip"></div>
+  <div class="credits">Рельеф: AWS Terrain Tiles (SRTM и др.) · Границы: Natural Earth · Координаты станций: © OpenStreetMap</div>
   <button class="panel legend-toggle" id="legendToggle">Участки</button>
 
+  <script>
+    // показываем ошибки загрузки на экране, а не только в консоли
+    const showErr = (m) => { const l = document.getElementById('loader'); if (l) { l.classList.remove('gone'); l.textContent = 'Ошибка: ' + m; } };
+    addEventListener('error', (e) => showErr(e.message || e.type));
+    addEventListener('unhandledrejection', (e) => showErr(e.reason && (e.reason.stack || e.reason.message) || String(e.reason)));
+  </script>
   <script src="data.js"></script>
   <script type="module" src="app.js"></script>
 </body>
