@@ -175,13 +175,15 @@ const cSub = (a, b) => C(a.re - b.re, a.im - b.im), cAdd = (a, b) => C(a.re + b.
 const cMul = (a, b) => C(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
 const cDiv = (a, b) => { const d = b.re * b.re + b.im * b.im; return C((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d); };
 const drawToC = p => C(p.x / 1000, -p.y / 1000);           // км, ось вниз = юг (как в карте)
-const realOf = n => { const c = GEO.coords[n]; if (!c) return null; const [x, z] = geoProject(c[1], c[0]); return C(x, z); };
+// у пунктов «Сархад» координаты — реальные точки пересечения пути с госграницей (ключ — пикетаж)
+const geoOf = s => (/сархад/i.test(s.name || '') ? GEO.borderCrossings[s.chain] : GEO.coords[s.name]);
+const realOf = s => { const c = geoOf(s); if (!c) return null; const [x, z] = geoProject(c[1], c[0]); return C(x, z); };
 const order = ['north-main', 'north-isfara', 'center-main', 'center-seshanbe', 'south-main', 'south-kulob'];
 const byId = Object.fromEntries(branches.map(b => [b.id, b]));
 for (const id of order) {
   const b = byId[id];
   const ctrl = [];
-  for (const s of stations.filter(s => s.branch === b)) { const r = realOf(s.name); if (r) ctrl.push({ d: s.atDraw, P: drawToC(s.onLine), R: r, name: s.name }); }
+  for (const s of stations.filter(s => s.branch === b)) { const r = realOf(s); if (r) ctrl.push({ d: s.atDraw, P: drawToC(s.onLine), R: r, name: s.name }); }
   for (const a of b.attach) {
     const parent = branches.filter(o => o !== b && o.warp).map(o => ({ o, ...project(o.pts, a.pt.x, a.pt.y) })).sort((p, q) => p.d - q.d)[0];
     const R = parent.o.warp(parent.at);
@@ -231,21 +233,28 @@ for (const l of flat.lines.filter(l => l.path && l.p.length === 2)) {
   ticks[kind].push([+w.re.toFixed(3), +w.im.toFixed(3), +ang.toFixed(3), best.b.section]);
 }
 
-// ---------- 11. Границы стран (Natural Earth 1:50m через world-atlas) ----------
-const topo = JSON.parse(fs.readFileSync(path.join(here, 'cache', 'countries-50m.json'), 'utf8'));
+// ---------- 11. Границы стран ----------
+const bordersFile = path.join(here, 'cache', 'countries-10m.json');
+if (!fs.existsSync(bordersFile)) { fs.mkdirSync(path.dirname(bordersFile), { recursive: true }); fs.writeFileSync(bordersFile, Buffer.from(await (await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-10m.json')).arrayBuffer())); }
+const topo = JSON.parse(fs.readFileSync(bordersFile, 'utf8'));
 const T = PROJ.terrain;
 const inBox = ([lon, lat]) => lon > T.lonMin - 0.3 && lon < T.lonMax + 0.3 && lat > T.latMin - 0.3 && lat < T.latMax + 0.3;
 const toXZ = ([lon, lat]) => geoProject(lon, lat).map(v => +v.toFixed(2));
 function clipLines(ml) {
   const out = [];
-  for (const line of ml) { let cur = []; for (const p of line) { if (inBox(p)) cur.push(toXZ(p)); else { if (cur.length > 1) out.push(cur); cur = []; } } if (cur.length > 1) out.push(cur); }
+  for (const line of ml) { let cur = []; for (const p of line) { if (inBox(p)) { const q = toXZ(p), l = cur[cur.length - 1]; if (!l || Math.hypot(q[0] - l[0], q[1] - l[1]) > 0.25) cur.push(q); } else { if (cur.length > 1) out.push(cur); cur = []; } } if (cur.length > 1) out.push(cur); }
   return out;
 }
 const TJ = '762';
-const tjBorder = clipLines(topojson.mesh(topo, topo.objects.countries, (a, b) => (a.id === TJ) !== (b.id === TJ)).coordinates);
+// Госграница Таджикистана — точная, из OpenStreetMap (отношение 214626); границы соседей между собой — Natural Earth 1:10m
+const osmBorderFile = path.join(here, 'cache', 'osm-tj-border.geojson');
+if (!fs.existsSync(osmBorderFile)) fs.writeFileSync(osmBorderFile, Buffer.from(await (await fetch('https://polygons.openstreetmap.fr/get_geojson.py?id=214626&params=0')).arrayBuffer()));
+const osmGeom = JSON.parse(fs.readFileSync(osmBorderFile, 'utf8'));
+const osmPolys = (osmGeom.geometries ? osmGeom.geometries[0] : osmGeom).coordinates;
+const thin = ring => { const out = []; for (const p of ring) { const q = toXZ(p), l = out[out.length - 1]; if (!l || Math.hypot(q[0] - l[0], q[1] - l[1]) > 0.2) out.push(q); } out.push(toXZ(ring[ring.length - 1])); return out; };
+const tjPolys = osmPolys.map(poly => poly.map(thin));
+const tjBorder = tjPolys.flatMap(poly => poly);
 const otherBorders = clipLines(topojson.mesh(topo, topo.objects.countries, (a, b) => a !== b && a.id !== TJ && b.id !== TJ).coordinates);
-const tjFeat = topojson.feature(topo, topo.objects.countries.geometries.find(g => g.id === TJ));
-const tjPolys = (tjFeat.geometry.type === 'Polygon' ? [tjFeat.geometry.coordinates] : tjFeat.geometry.coordinates).map(poly => poly.map(ring => ring.map(toXZ)));
 const inside = (x, z) => { let c = false; for (const poly of tjPolys) for (const ring of poly) for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const [xi, zi] = ring[i], [xj, zj] = ring[j]; if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) c = !c; } return c; };
 
 const LABELS = [
@@ -280,7 +289,7 @@ const outStations = stations.filter(s => !isForeign(s)).map(s => {
   const bOut = outBranches.find(o => o.id === s.branch.id);
   let at = 0; { let best = Infinity, acc = 0; for (let i = 0; i < bOut.pts.length; i++) { if (i) acc += Math.hypot(bOut.pts[i][0] - bOut.pts[i-1][0], bOut.pts[i][1] - bOut.pts[i-1][1]); const d = Math.hypot(bOut.pts[i][0] - w.re, bOut.pts[i][1] - w.im); if (d < best) { best = d; at = acc; } } }
   return { id: s.id, name: s.name || null, chain: s.chain, km: parseChain(s.chain), note: s.note, section: s.branch.section, branch: s.branch.id, at: R3(at), x: R3(w.re), z: R3(w.im),
-    junction: s.junction, border: isBorder(s) || undefined, geo: !!GEO.coords[s.name] };
+    junction: s.junction, border: isBorder(s) || undefined, geo: !!geoOf(s) };
 }).sort((a, b) => order.indexOf(a.branch) - order.indexOf(b.branch) || a.at - b.at);
 const foreignStations = stations.filter(isForeign).map(s => { const w = s.branch.warp(s.atDraw); return { name: s.name, country: 'Узбекистан', x: R3(w.re), z: R3(w.im), section: s.branch.section }; });
 
