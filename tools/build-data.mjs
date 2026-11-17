@@ -325,44 +325,6 @@ for (const b of branches) {
 }
 const plen = pts => { let s = 0; for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]); return s; };
 
-// ---------- 12a. Участки, нарисованные на чертеже условно: форма — реальный путь (OSM), отметки — по пикетажу ----------
-const realTracks = [];
-const REAL = JSON.parse(fs.readFileSync(path.join(here, 'real-tracks.json'), 'utf8')).tracks;
-for (const rt of REAL) {
-  const ob = outBranches.find(o => o.id === rt.branch);
-  const sFrom = stations.find(s => s.name === rt.from), sTo = stations.find(s => isBorder(s) && s.chain === rt.toChain);
-  const wF = sFrom.branch.warp(sFrom.atDraw), wT = sTo.branch.warp(sTo.atDraw);
-  const nearestIdx = w => ob.pts.reduce((bi, p, i) => Math.hypot(p[0] - w.re, p[1] - w.im) < Math.hypot(ob.pts[bi][0] - w.re, ob.pts[bi][1] - w.im) ? i : bi, 0);
-  const i0 = nearestIdx(wF), i1 = nearestIdx(wT);
-  if (i0 >= i1) throw new Error('real-tracks: станции в обратном порядке для ' + rt.from);
-  // реальный путь: обрезаем начало ровно по станции
-  let pts = rt.coords.map(([la, lo]) => geoProject(lo, la));
-  let bestI = 0, bestT = 0, bestD = Infinity;
-  for (let i = 1; i < pts.length; i++) {
-    const [ax, az] = pts[i - 1], [bx, bz] = pts[i], dx = bx - ax, dz = bz - az, ll = dx * dx + dz * dz;
-    const t = ll ? Math.max(0, Math.min(1, ((wF.re - ax) * dx + (wF.im - az) * dz) / ll)) : 0;
-    const d = Math.hypot(ax + t * dx - wF.re, az + t * dz - wF.im); if (d < bestD) { bestD = d; bestI = i; bestT = t; }
-  }
-  pts = [[wF.re, wF.im], ...pts.slice(bestI)];
-  pts[pts.length - 1] = [wT.re, wT.im];
-  pts = pts.map(p => [R3(p[0]), R3(p[1])]);
-  ob.pts = [...ob.pts.slice(0, i0), ...pts, ...ob.pts.slice(i1 + 1)];
-  // отметки: км (целые) и пикеты (каждые 100 м), равномерно по пикетажу от chainFrom до chainTo
-  const cumR = [0]; for (let i = 1; i < pts.length; i++) cumR.push(cumR[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
-  const Lr = cumR[cumR.length - 1], span = rt.chainFrom - rt.chainTo;
-  const at = s => { let i = 1; while (i < cumR.length - 1 && cumR[i] < s) i++; const t = (s - cumR[i - 1]) / (cumR[i] - cumR[i - 1] || 1); return [pts[i - 1][0] + t * (pts[i][0] - pts[i - 1][0]), pts[i - 1][1] + t * (pts[i][1] - pts[i - 1][1])]; };
-  let km = 0, pk = 0;
-  for (let k = Math.ceil(rt.chainTo * 10 + 1e-6); k < rt.chainFrom * 10 - 1e-6; k++) {
-    const c = k / 10, s = ((rt.chainFrom - c) / span) * Lr;
-    const [x, z] = at(s), [x1, z1] = at(Math.max(0, s - 0.03)), [x2, z2] = at(Math.min(Lr, s + 0.03));
-    const ang = Math.atan2(z2 - z1, x2 - x1) + Math.PI / 2;
-    const tick = [R3(x), R3(z), +ang.toFixed(3), sFrom.branch.section, 1, ((k % 10) + 10) % 10];
-    if (k % 10 === 0) { ticks.km.push(tick); km++; } else { ticks.pk.push(tick); pk++; }
-  }
-  const mid = at(Lr / 2);
-  realTracks.push({ from: rt.from, toChain: rt.toChain, branch: rt.branch, length: R3(Lr), chainFrom: rt.chainFrom, chainTo: rt.chainTo, source: rt.source, mid: [R3(mid[0]), R3(mid[1])] });
-  console.log('  реальный путь', rt.from, '— Сархад', rt.toChain + ':', Lr.toFixed(1), 'км (по пикетажу', span.toFixed(1), 'км), рассчитано км-отметок', km, ', пикетов', pk);
-}
 for (const ob of outBranches) ob.length = R3(plen(ob.pts));
 const outStations = stations.filter(s => !isForeign(s)).map(s => {
   const w = s.branch.warp(s.atDraw);
@@ -372,6 +334,157 @@ const outStations = stations.filter(s => !isForeign(s)).map(s => {
     junction: s.junction, border: isBorder(s) || undefined, geo: !!geoOf(s) };
 }).sort((a, b) => order.indexOf(a.branch) - order.indexOf(b.branch) || a.at - b.at);
 const foreignStations = stations.filter(isForeign).map(s => { const w = s.branch.warp(s.atDraw); return { name: s.name, country: 'Узбекистан', x: R3(w.re), z: R3(w.im), section: s.branch.section }; });
+
+// ---------- 13. Реальная геометрия путей (OpenStreetMap): без изломов, КМ и ПК ровно по километражу ----------
+// Между каждой парой соседних станций путь прокладывается по реальным рельсам OSM (кратчайший путь по графу,
+// главные пути предпочтительнее станционных). Готовые маршруты сохраняются в tools/osm-tracks.json, поэтому
+// пересборка работает и без интернета. КМ и ПК ставятся через каждые 100 м по километражу соседних станций.
+(function realGeometry() { // отдельная функция: так V8 не пытается оптимизировать весь скрипт целиком
+  const tracksFile = path.join(here, 'osm-tracks.json');
+  const railsFile = path.join(here, 'cache', 'osm-rails.json');
+  const saved = fs.existsSync(tracksFile) ? JSON.parse(fs.readFileSync(tracksFile, 'utf8')) : { spans: {} };
+  const hav = (a, b) => { const R = 6371, t = Math.PI / 180, dl = (b[0] - a[0]) * t, dn = (b[1] - a[1]) * t; const h = Math.sin(dl / 2) ** 2 + Math.cos(a[0] * t) * Math.cos(b[0] * t) * Math.sin(dn / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); };
+  // граф рельсов
+  let G = null;
+  if (fs.existsSync(railsFile)) {
+    const d = JSON.parse(fs.readFileSync(railsFile, 'utf8'));
+    G = { id: new Map(), ll: [], adj: [] };
+    const nid = p => { const k = p.lat.toFixed(7) + ',' + p.lon.toFixed(7); let i = G.id.get(k); if (i == null) { i = G.ll.length; G.id.set(k, i); G.ll.push([p.lat, p.lon]); G.adj.push([]); } return i; };
+    for (const w of d.elements) {
+      if (!w.geometry) continue;
+      const slow = w.tags && (w.tags.service || /^(industrial|military|tourism)$/.test(w.tags.usage || '')) ? 4 : 1;
+      for (let i = 1; i < w.geometry.length; i++) {
+        const a = nid(w.geometry[i - 1]), b = nid(w.geometry[i]), l = hav(G.ll[a], G.ll[b]);
+        G.adj[a].push([b, l * slow]); G.adj[b].push([a, l * slow]);
+      }
+    }
+  }
+  const nearestNode = ll => { let bi = -1, bd = Infinity; for (let i = 0; i < G.ll.length; i++) { const d = Math.abs(G.ll[i][0] - ll[0]) + Math.abs(G.ll[i][1] - ll[1]) * 0.78; if (d < bd) { bd = d; bi = i; } } return bi; };
+  function dijkstra(src, dst) {
+    const dist = new Float64Array(G.ll.length).fill(Infinity), prev = new Int32Array(G.ll.length).fill(-1), heap = [[0, src]];
+    dist[src] = 0;
+    const push = x => { heap.push(x); let i = heap.length - 1; while (i) { const p = (i - 1) >> 1; if (heap[p][0] <= heap[i][0]) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+    const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
+    while (heap.length) {
+      const [du, u] = pop(); if (du > dist[u]) continue; if (u === dst) break;
+      for (const [v, l] of G.adj[u]) if (du + l < dist[v]) { dist[v] = du + l; prev[v] = u; push([du + l, v]); }
+    }
+    if (dist[dst] === Infinity) return null;
+    const pathIdx = []; for (let k = dst; k !== -1; k = prev[k]) pathIdx.push(k);
+    return pathIdx.reverse().map(i => G.ll[i]);
+  }
+  const route = (key, a, b) => {
+    if (saved.spans[key]) return saved.spans[key];
+    if (!G) return null;
+    const p = dijkstra(nearestNode(a), nearestNode(b));
+    if (p) saved.spans[key] = p.map(([la, lo]) => [+la.toFixed(6), +lo.toFixed(6)]);
+    return saved.spans[key] || null;
+  };
+  const llOf = s => geoOf(s);
+  const xz = ([la, lo]) => geoProject(lo, la);
+  const lenLL = pts => { let s = 0; for (let i = 1; i < pts.length; i++) s += hav(pts[i - 1], pts[i]); return s; };
+
+  const newTicks = { km: [], pk: [] }, report = [];
+  const realBranches = new Set();
+  for (const ob of outBranches) {
+    const b = byId[ob.id];
+    // опорные точки ветки: станция примыкания (для ответвлений) + станции ветки по порядку
+    const own = stations.filter(s => s.branch === b && !isForeign(s)).sort((p, q) => p.atDraw - q.atDraw);
+    const anchors = own.map(s => ({ s, ll: llOf(s), km: parseChain(s.chain) }));
+    // ветка, которая начинается/кончается на станции другой ветки (Ёвон): добавляем её
+    if (b.from && !own.some(s => s.name === b.from)) { const st = byName(b.from); anchors.unshift({ s: st, ll: llOf(st), km: parseChain(st.chain) }); }
+    if (b.to && !own.some(s => s.name === b.to)) { const st = byName(b.to); anchors.push({ s: st, ll: llOf(st), km: parseChain(st.chain) }); }
+    for (const a of b.attach) {
+      const j = stations.find(s => (s.junction || []).includes(b.id) && s.branch !== b);
+      if (j) { const A = { s: j, ll: llOf(j), km: [], junction: true }; a.end ? anchors.push(A) : anchors.unshift(A); }
+    }
+    if (anchors.some(a => !a.ll)) { report.push(ob.id + ': есть станция без координат — оставлен путь по чертежу'); continue; }
+    // маршруты между соседними опорными точками
+    const spans = [];
+    for (let i = 1; i < anchors.length; i++) {
+      const A = anchors[i - 1], B = anchors[i];
+      const r = route(ob.id + '|' + (A.s.name + ' ' + (A.s.chain || '')) + '|' + (B.s.name + ' ' + (B.s.chain || '')), A.ll, B.ll);
+      const straight = hav(A.ll, B.ll), L = r ? lenLL(r) : 0;
+      if (!r || L > straight * 3 + 2) { spans.length = 0; report.push(ob.id + ': нет реального пути ' + A.s.name + ' → ' + B.s.name + ' — оставлен путь по чертежу'); break; }
+      spans.push({ A, B, r, L });
+    }
+    if (!spans.length) continue;
+    realBranches.add(ob.id);
+    // геометрия ветки
+    const ll = []; for (const sp of spans) for (const p of (ll.length ? sp.r.slice(1) : sp.r)) ll.push(p);
+    ob.pts = ll.map(p => xz(p).map(R3));
+    // километраж каждого отрезка: пара значений КМ, лучше всего согласующаяся с реальной длиной
+    const dir = b.chainDir;
+    let prevEnd = null;
+    for (const sp of spans) {
+      let kA = null, kB = null, best = Infinity;
+      const As = sp.A.junction ? [] : sp.A.km, Bs = sp.B.km;
+      for (const x of As) for (const y of Bs) { const dk = Math.abs(y - x), q = Math.abs(dk - sp.L); if (dk > sp.L * 0.7 && dk < sp.L * 1.4 && q < best) { best = q; kA = x; kB = y; } }
+      if (kA == null && Bs.length) { kB = Bs.reduce((m, y) => (prevEnd != null && Math.abs(y - prevEnd) < Math.abs(m - prevEnd) ? y : m), Bs[0]); kA = kB - dir * sp.L; }
+      if (kA == null && As.length) { kA = As[0]; kB = kA + dir * sp.L; }
+      if (kA == null) { kA = prevEnd ?? 0; kB = kA + dir * sp.L; }
+      prevEnd = kB; sp.kA = kA; sp.kB = kB;
+      report.push('  ' + (sp.A.s.name || '?').padEnd(14) + '→ ' + (sp.B.s.name || '?').padEnd(14) + 'путь ' + sp.L.toFixed(1).padStart(5) + ' км | по КМ ' + Math.abs(kB - kA).toFixed(1).padStart(5) + ' км');
+      // КМ и ПК через каждые 100 м, равномерно по реальной длине отрезка
+      const P = sp.r.map(xz), cum = [0];
+      for (let i = 1; i < P.length; i++) cum.push(cum[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+      const Lx = cum[cum.length - 1];
+      const at = s => { let i = 1; while (i < cum.length - 1 && cum[i] < s) i++; const t = (s - cum[i - 1]) / (cum[i] - cum[i - 1] || 1); return [P[i - 1][0] + t * (P[i][0] - P[i - 1][0]), P[i - 1][1] + t * (P[i][1] - P[i - 1][1])]; };
+      const lo = Math.min(kA, kB), hi = Math.max(kA, kB);
+      for (let k = Math.floor(lo * 10 + 1e-6) + 1; k / 10 < hi - 1e-6; k++) {
+        const c = k / 10, s = ((c - kA) / (kB - kA)) * Lx;
+        const [x, z] = at(s), [x1, z1] = at(Math.max(0, s - 0.03)), [x2, z2] = at(Math.min(Lx, s + 0.03));
+        const ang = Math.atan2(z2 - z1, x2 - x1) + Math.PI / 2, n = ((k % 10) + 10) % 10;
+        const t = [R3(x), R3(z), +ang.toFixed(3), b.section, 0, n];
+        (n === 0 ? newTicks.km : newTicks.pk).push(t);
+      }
+      // станции встают на рельсы (ближайший узел пути)
+      for (const e of [sp.A, sp.B]) if (!e.junction) { const [x, z] = xz(e === sp.A ? sp.r[0] : sp.r[sp.r.length - 1]); e.s.snap = [R3(x), R3(z)]; }
+    }
+  }
+  ticks.km = newTicks.km; ticks.pk = newTicks.pk;
+  // ветки, оставшиеся по чертежу (у станции нет координат — Сешанбе): примыкаем к станции, сглаживаем изломы,
+  // КМ и ПК ставим так же ровно — от КМ станции по направлению километража
+  for (const ob of outBranches) if (!realBranches.has(ob.id)) {
+    const b = byId[ob.id];
+    for (const a of b.attach) { const j = stations.find(s => (s.junction || []).includes(b.id) && s.branch !== b); if (j && j.snap) a.end ? ob.pts.push(j.snap) : ob.pts.unshift(j.snap); }
+    let P = ob.pts.map(p => [p[0], p[1]]);
+    for (let it = 0; it < 3; it++) { const Q = [P[0]]; for (let i = 1; i < P.length; i++) { const [a, c] = [P[i - 1], P[i]]; Q.push([0.75 * a[0] + 0.25 * c[0], 0.75 * a[1] + 0.25 * c[1]], [0.25 * a[0] + 0.75 * c[0], 0.25 * a[1] + 0.75 * c[1]]); } Q.push(P[P.length - 1]); P = Q; }
+    ob.pts = P.map(p => [R3(p[0]), R3(p[1])]);
+    const cum = [0]; for (let i = 1; i < P.length; i++) cum.push(cum[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+    const L = cum[cum.length - 1];
+    const at = s => { let i = 1; while (i < cum.length - 1 && cum[i] < s) i++; const t = (s - cum[i - 1]) / (cum[i] - cum[i - 1] || 1); return [P[i - 1][0] + t * (P[i][0] - P[i - 1][0]), P[i - 1][1] + t * (P[i][1] - P[i - 1][1])]; };
+    const ref = stations.filter(s => s.branch === b && parseChain(s.chain).length).map(s => { const w = b.warp(s.atDraw); let bi = 0; P.forEach((p, i) => { if (Math.hypot(p[0] - w.re, p[1] - w.im) < Math.hypot(P[bi][0] - w.re, P[bi][1] - w.im)) bi = i; }); return { s, k: parseChain(s.chain)[0], arc: cum[bi] }; })[0];
+    if (!ref) continue;
+    const kAt = s => ref.k + b.chainDir * (s - ref.arc), lo = Math.min(kAt(0), kAt(L)), hi = Math.max(kAt(0), kAt(L));
+    for (let k = Math.floor(lo * 10 + 1e-6) + 1; k / 10 < hi - 1e-6; k++) {
+      const c = k / 10, s = ref.arc + (c - ref.k) / b.chainDir;
+      const [x, z] = at(s), [x1, z1] = at(Math.max(0, s - 0.03)), [x2, z2] = at(Math.min(L, s + 0.03));
+      const n = ((k % 10) + 10) % 10, t = [R3(x), R3(z), +(Math.atan2(z2 - z1, x2 - x1) + Math.PI / 2).toFixed(3), b.section, 0, n];
+      (n === 0 ? ticks.km : ticks.pk).push(t);
+    }
+    report.push(ob.id + ': по чертежу (сглажено), КМ ' + lo.toFixed(1) + '…' + hi.toFixed(1));
+  }
+  // участки за границей — тоже по реальным рельсам
+  for (const f of outForeign) {
+    const fs_ = stations.find(s => s.name === f.name), brd = stations.filter(s => isBorder(s) && s.branch === fs_.branch).sort((p, q) => Math.abs(p.atDraw - fs_.atDraw) - Math.abs(q.atDraw - fs_.atDraw))[0];
+    const r = route('foreign|' + f.name, llOf(brd), llOf(fs_));
+    if (r) f.pts = r.map(p => xz(p).map(R3));
+  }
+  for (const ob of outBranches) ob.length = R3(plen(ob.pts));
+  for (const s of outStations) {
+    const src = stations.find(x => x.id === s.id);
+    if (src.snap) { s.x = src.snap[0]; s.z = src.snap[1]; }
+    const bOut = outBranches.find(o => o.id === s.branch);
+    let best = Infinity, acc = 0;
+    for (let i = 0; i < bOut.pts.length; i++) { if (i) acc += Math.hypot(bOut.pts[i][0] - bOut.pts[i - 1][0], bOut.pts[i][1] - bOut.pts[i - 1][1]); const d = Math.hypot(bOut.pts[i][0] - s.x, bOut.pts[i][1] - s.z); if (d < best) { best = d; s.at = R3(acc); } }
+  }
+  outStations.sort((a, b) => order.indexOf(a.branch) - order.indexOf(b.branch) || a.at - b.at);
+  for (const fsn of foreignStations) { const c = GEO.coords[fsn.name]; if (c) { const [x, z] = geoProject(c[1], c[0]); fsn.x = R3(x); fsn.z = R3(z); } }
+  saved.source = 'OpenStreetMap (© участники OpenStreetMap, ODbL): маршруты по рельсам между соседними станциями';
+  fs.writeFileSync(tracksFile, JSON.stringify(saved));
+  console.log('Реальная геометрия путей:'); for (const r of report) console.log(' ', r);
+})();
 
 const out = {
   source: path.basename(dwgPath), generated: new Date().toISOString().slice(0, 10),
@@ -383,7 +496,6 @@ const out = {
   ticks,
   borders: { tj: tjBorder, other: otherBorders, tjPolys },
   labels: LABELS,
-  realTracks,
 };
 fs.writeFileSync(path.join(root, 'data.js'), '// Сгенерировано tools/build-data.mjs из ' + out.source + '\nwindow.RAIL_DATA = ' + JSON.stringify(out) + ';\n');
 console.log('Участков:', out.sections.length, '| станций (наших):', outStations.filter(s => !s.border).length, '| Сархад:', outStations.filter(s => s.border).length, '| км-отметок:', ticks.km.length, '| пикетов:', ticks.pk.length);
