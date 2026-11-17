@@ -298,7 +298,8 @@ function buildTicks(list, w, len, opacity) {
   const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity, depthWrite: false });
   const mesh = new THREE.InstancedMesh(geo, mat, list.length);
   const c = new THREE.Color();
-  list.forEach((t, i) => { c.copy(sectionById[t[3]].col).lerp(new THREE.Color(1, 1, 1), 0.55); mesh.setColorAt(i, c); });
+  const calc = new THREE.Color('#ffc861'); // отметки, рассчитанные по пикетажу (на чертеже их нет)
+  list.forEach((t, i) => { if (t[4]) c.copy(calc); else c.copy(sectionById[t[3]].col).lerp(new THREE.Color(1, 1, 1), 0.55); mesh.setColorAt(i, c); });
   mesh.renderOrder = 7; mesh.frustumCulled = false; mesh.userData = { base: opacity, list };
   scene.add(mesh); return mesh;
 }
@@ -375,6 +376,7 @@ function addBig(text, x, z, cls) {
 }
 for (const l of DATA.labels) addBig(l.t, l.x, l.z, l.k === 'country' ? 'geo-label country' : 'geo-label region');
 for (const f of DATA.foreignStations) addBig('→ ' + f.name + ' (' + f.country + ')', f.x, f.z, 'geo-label foreign');
+for (const r of DATA.realTracks || []) addBig('путь по OpenStreetMap · км-отметки по пикетажу', r.mid[0], r.mid[1], 'geo-label foreign calc');
 
 // ============================================================
 //  Поезда
@@ -515,6 +517,8 @@ function selectStation(s, fly) {
   facts.push(['Участок', sec.name + ' (' + sec.region + ')']);
   if (s.junction) facts.push(['Примыкание', s.junction.map((id) => branchById[id].name).join('; ')]);
   if (!s.geo && !s.border) facts.push(['Положение', 'по чертежу (нет точных координат)']);
+  for (const r of DATA.realTracks || []) if (s.name === r.from || (s.border && s.chain === r.toChain))
+    facts.push(['До Сархад', 'путь по OpenStreetMap (' + fmtKm(r.length) + '); км-отметки рассчитаны по пикетажу ' + r.chainFrom.toFixed(3).replace('.', '+') + ' → ' + r.toChain]);
   $('#cardFacts').innerHTML = facts.map(() => '<dt></dt><dd></dd>').join('');
   const dts = $('#cardFacts').querySelectorAll('dt'), dds = $('#cardFacts').querySelectorAll('dd');
   facts.forEach(([k, v], i) => { dts[i].textContent = k; dds[i].textContent = v; });

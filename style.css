@@ -170,3 +170,6 @@ h1 { margin: 4px 0 10px; font-size: 20px; line-height: 1.2; font-weight: 800; le
 .loader.gone { opacity: 0; pointer-events: none; }
 .credits { position: fixed; z-index: 3; right: 18px; bottom: 66px; font-size: 10.5px; color: var(--faint); text-shadow: 0 1px 3px #000; pointer-events: none; }
 @media (max-width: 760px) { .credits { display: none; } }
+
+.k-calc { width: 3px !important; height: 12px !important; border-radius: 1px !important; background: #ffc861; margin: 0 6px 0 5px; }
+.geo-label.calc { color: #ffc861; }

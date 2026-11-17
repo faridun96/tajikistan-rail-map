@@ -283,6 +283,45 @@ for (const b of branches) {
   flush();
 }
 const plen = pts => { let s = 0; for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]); return s; };
+
+// ---------- 12a. Участки, нарисованные на чертеже условно: форма — реальный путь (OSM), отметки — по пикетажу ----------
+const realTracks = [];
+const REAL = JSON.parse(fs.readFileSync(path.join(here, 'real-tracks.json'), 'utf8')).tracks;
+for (const rt of REAL) {
+  const ob = outBranches.find(o => o.id === rt.branch);
+  const sFrom = stations.find(s => s.name === rt.from), sTo = stations.find(s => isBorder(s) && s.chain === rt.toChain);
+  const wF = sFrom.branch.warp(sFrom.atDraw), wT = sTo.branch.warp(sTo.atDraw);
+  const nearestIdx = w => ob.pts.reduce((bi, p, i) => Math.hypot(p[0] - w.re, p[1] - w.im) < Math.hypot(ob.pts[bi][0] - w.re, ob.pts[bi][1] - w.im) ? i : bi, 0);
+  const i0 = nearestIdx(wF), i1 = nearestIdx(wT);
+  if (i0 >= i1) throw new Error('real-tracks: станции в обратном порядке для ' + rt.from);
+  // реальный путь: обрезаем начало ровно по станции
+  let pts = rt.coords.map(([la, lo]) => geoProject(lo, la));
+  let bestI = 0, bestT = 0, bestD = Infinity;
+  for (let i = 1; i < pts.length; i++) {
+    const [ax, az] = pts[i - 1], [bx, bz] = pts[i], dx = bx - ax, dz = bz - az, ll = dx * dx + dz * dz;
+    const t = ll ? Math.max(0, Math.min(1, ((wF.re - ax) * dx + (wF.im - az) * dz) / ll)) : 0;
+    const d = Math.hypot(ax + t * dx - wF.re, az + t * dz - wF.im); if (d < bestD) { bestD = d; bestI = i; bestT = t; }
+  }
+  pts = [[wF.re, wF.im], ...pts.slice(bestI)];
+  pts[pts.length - 1] = [wT.re, wT.im];
+  pts = pts.map(p => [R3(p[0]), R3(p[1])]);
+  ob.pts = [...ob.pts.slice(0, i0), ...pts, ...ob.pts.slice(i1 + 1)];
+  // отметки: км (целые) и пикеты (каждые 100 м), равномерно по пикетажу от chainFrom до chainTo
+  const cumR = [0]; for (let i = 1; i < pts.length; i++) cumR.push(cumR[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const Lr = cumR[cumR.length - 1], span = rt.chainFrom - rt.chainTo;
+  const at = s => { let i = 1; while (i < cumR.length - 1 && cumR[i] < s) i++; const t = (s - cumR[i - 1]) / (cumR[i] - cumR[i - 1] || 1); return [pts[i - 1][0] + t * (pts[i][0] - pts[i - 1][0]), pts[i - 1][1] + t * (pts[i][1] - pts[i - 1][1])]; };
+  let km = 0, pk = 0;
+  for (let k = Math.ceil(rt.chainTo * 10 + 1e-6); k < rt.chainFrom * 10 - 1e-6; k++) {
+    const c = k / 10, s = ((rt.chainFrom - c) / span) * Lr;
+    const [x, z] = at(s), [x1, z1] = at(Math.max(0, s - 0.03)), [x2, z2] = at(Math.min(Lr, s + 0.03));
+    const ang = Math.atan2(z2 - z1, x2 - x1) + Math.PI / 2;
+    const tick = [R3(x), R3(z), +ang.toFixed(3), sFrom.branch.section, 1];
+    if (k % 10 === 0) { ticks.km.push(tick); km++; } else { ticks.pk.push(tick); pk++; }
+  }
+  const mid = at(Lr / 2);
+  realTracks.push({ from: rt.from, toChain: rt.toChain, branch: rt.branch, length: R3(Lr), chainFrom: rt.chainFrom, chainTo: rt.chainTo, source: rt.source, mid: [R3(mid[0]), R3(mid[1])] });
+  console.log('  реальный путь', rt.from, '— Сархад', rt.toChain + ':', Lr.toFixed(1), 'км (по пикетажу', span.toFixed(1), 'км), рассчитано км-отметок', km, ', пикетов', pk);
+}
 for (const ob of outBranches) ob.length = R3(plen(ob.pts));
 const outStations = stations.filter(s => !isForeign(s)).map(s => {
   const w = s.branch.warp(s.atDraw);
@@ -303,6 +342,7 @@ const out = {
   ticks,
   borders: { tj: tjBorder, other: otherBorders, tjPolys },
   labels: LABELS,
+  realTracks,
 };
 fs.writeFileSync(path.join(root, 'data.js'), '// Сгенерировано tools/build-data.mjs из ' + out.source + '\nwindow.RAIL_DATA = ' + JSON.stringify(out) + ';\n');
 console.log('Участков:', out.sections.length, '| станций (наших):', outStations.filter(s => !s.border).length, '| Сархад:', outStations.filter(s => s.border).length, '| км-отметок:', ticks.km.length, '| пикетов:', ticks.pk.length);
