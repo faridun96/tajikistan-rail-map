@@ -230,8 +230,49 @@ for (const l of flat.lines.filter(l => l.path && l.p.length === 2)) {
   if (best.d > 400 || best.b.isForeignAt(best.at)) continue;
   const w = best.b.warp(best.at), t1 = best.b.warp(Math.max(0, best.at - 30)), t2 = best.b.warp(Math.min(best.b.L, best.at + 30));
   const ang = Math.atan2(t2.im - t1.im, t2.re - t1.re) + Math.PI / 2; // поперёк пути
-  ticks[kind].push([+w.re.toFixed(3), +w.im.toFixed(3), +ang.toFixed(3), best.b.section]);
+  const t = [+w.re.toFixed(3), +w.im.toFixed(3), +ang.toFixed(3), best.b.section, 0, 0];
+  ticks[kind].push(t); (best.b.tickMeta = best.b.tickMeta || []).push({ kind, at: best.at, t });
 }
+// Номера пикетов: между км-отметками 9 пикетов, ПК1…ПК9 считаются от км-отметки по направлению роста километража
+const chainNum = c => { const m = (c || '').trim().match(/^(\d+)(?:\+(\d+))?$/); return m ? +m[1] + (m[2] ? +m[2] / 1000 : 0) : null; };
+const pkHist = {};
+for (const b of branches) {
+  const st = stations.filter(s => s.branch === b).map(s => ({ a: s.atDraw, k: chainNum(s.chain) })).filter(x => x.k != null).sort((p, q) => p.a - q.a);
+  let vote = 0; for (let i = 1; i < st.length; i++) vote += Math.sign((st[i].k - st[i - 1].k) * (st[i].a - st[i - 1].a));
+  b.chainDir = vote ? Math.sign(vote) : (b.attach.some(a => a.end) ? -1 : 1); // одна станция: километраж растёт от примыкания
+  let meta = (b.tickMeta || []).sort((p, q) => p.at - q.at);
+  const kms = meta.filter(m => m.kind === 'km').map(m => m.at);
+  // штрих пикета, лежащий под км-отметкой, — это сама км-отметка: убираем
+  const under = new Set(meta.filter(m => m.kind === 'pk' && kms.some(k => Math.abs(k - m.at) < 15)).map(m => m.t));
+  ticks.pk = ticks.pk.filter(t => !under.has(t)); meta = meta.filter(m => !under.has(m.t));
+  const pks = meta.filter(m => m.kind === 'pk');
+  const step = pks.length > 1 ? pks.slice(1).map((m, i) => m.at - pks[i].at).sort((x, y) => x - y)[Math.floor((pks.length - 1) / 2)] : 100;
+  for (const m of pks) {
+    const lo = kms.filter(x => x < m.at).pop(), hi = kms.find(x => x > m.at);
+    let fromLow; // доля пути от нижней (по дуге) км-отметки, в десятых
+    if (lo != null && hi != null) fromLow = Math.round(((m.at - lo) / (hi - lo)) * 10);
+    else if (lo != null) fromLow = Math.round((m.at - lo) / step);
+    else if (hi != null) fromLow = 10 - Math.round((hi - m.at) / step);
+    else fromLow = 0;
+    const n = b.chainDir > 0 ? fromLow : 10 - fromLow;
+    m.t[5] = Math.min(9, Math.max(1, n));
+  }
+  // проверка: сколько пикетов между соседними км-отметками
+  for (let i = 1; i < kms.length; i++) { const c = pks.filter(m => m.at > kms[i - 1] && m.at < kms[i]).length; pkHist[c] = (pkHist[c] || 0) + 1; }
+}
+{ // сверка: на чертеже подпись ПКn стоит сразу за n-м штрихом от км-отметки
+  let ok = 0, all = 0;
+  for (const t of flat.texts.filter(t => /^ПК\d$/.test(t.t))) {
+    const n = +t.t.slice(2), c = textCenter(t); let best = null;
+    for (const b of branches) { const pr = project(b.pts, c.x, c.y); if (!best || pr.d < best.d) best = { b, ...pr }; }
+    const kms = best.b.tickMeta.filter(m => m.kind === 'km').map(m => m.at).sort((x, y) => x - y);
+    const lo = kms.filter(x => x <= best.at).pop(), hi = kms.find(x => x > best.at); if (lo == null || hi == null) continue;
+    let pos = ((best.at - lo) / (hi - lo)) * 10; if (pos < 1 && n === 9) pos += 10; // ПК9 у следующей км-отметки
+    all++; if (pos - n > -0.6 && pos - n < 2.1) ok++;
+  }
+  console.log('  номера ПК совпадают с подписями чертежа:', ok, 'из', all);
+}
+console.log('  пикетов между соседними км-отметками (кол-во: сколько раз):', JSON.stringify(pkHist), '| направление километража:', branches.map(b => b.id + (b.chainDir > 0 ? '↑' : '↓')).join(' '));
 
 // ---------- 11. Границы стран ----------
 const bordersFile = path.join(here, 'cache', 'countries-10m.json');
@@ -315,7 +356,7 @@ for (const rt of REAL) {
     const c = k / 10, s = ((rt.chainFrom - c) / span) * Lr;
     const [x, z] = at(s), [x1, z1] = at(Math.max(0, s - 0.03)), [x2, z2] = at(Math.min(Lr, s + 0.03));
     const ang = Math.atan2(z2 - z1, x2 - x1) + Math.PI / 2;
-    const tick = [R3(x), R3(z), +ang.toFixed(3), sFrom.branch.section, 1];
+    const tick = [R3(x), R3(z), +ang.toFixed(3), sFrom.branch.section, 1, ((k % 10) + 10) % 10];
     if (k % 10 === 0) { ticks.km.push(tick); km++; } else { ticks.pk.push(tick); pk++; }
   }
   const mid = at(Lr / 2);

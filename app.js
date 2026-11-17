@@ -11,6 +11,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 const DATA = window.RAIL_DATA;
 const $ = (s) => document.querySelector(s);
+const kmText = (c) => 'КМ ' + c.replace(/\s*км/gi, '').replace(' / ', ' · ');
 const fmtKm = (v) => (v < 10 ? v.toFixed(1) : Math.round(v)).toString().replace('.', ',') + ' км';
 const BG = new THREE.Color('#04070d');
 const EX = 3;          // вертикальное преувеличение рельефа
@@ -43,7 +44,7 @@ scene.fog = new THREE.FogExp2(BG, 0.002);
 
 const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 6000);
 const controls = new MapControls(camera, renderer.domElement);
-Object.assign(controls, { enableDamping: true, dampingFactor: 0.08, minDistance: 3, maxDistance: 1500, maxPolarAngle: 1.25, zoomToCursor: true, screenSpacePanning: false });
+Object.assign(controls, { enableDamping: true, dampingFactor: 0.08, minDistance: 1.2, maxDistance: 1500, maxPolarAngle: 1.25, zoomToCursor: true, screenSpacePanning: false });
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
@@ -298,13 +299,50 @@ function buildTicks(list, w, len, opacity) {
   const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity, depthWrite: false });
   const mesh = new THREE.InstancedMesh(geo, mat, list.length);
   const c = new THREE.Color();
-  const calc = new THREE.Color('#ffc861'); // отметки, рассчитанные по пикетажу (на чертеже их нет)
+  const calc = new THREE.Color('#ffc861'); // отметки, рассчитанные по километражу (на чертеже их нет)
   list.forEach((t, i) => { if (t[4]) c.copy(calc); else c.copy(sectionById[t[3]].col).lerp(new THREE.Color(1, 1, 1), 0.55); mesh.setColorAt(i, c); });
   mesh.renderOrder = 7; mesh.frustumCulled = false; mesh.userData = { base: opacity, list };
   scene.add(mesh); return mesh;
 }
 const kmTicks = buildTicks(DATA.ticks.km, 0.05, 0.42, 0.6);
 const pkTicks = buildTicks(DATA.ticks.pk, 0.022, 0.2, 0.5);
+
+// Подписи пикетов ПК1…ПК9: одна текстура-атлас на все, рисуются точками (тысячи подписей без нагрузки на страницу)
+const pkLabels = (() => {
+  const cell = 64, cv = document.createElement('canvas'); cv.width = cell * 9; cv.height = cell;
+  const ctx = cv.getContext('2d');
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '700 21px Inter, system-ui, sans-serif'; ctx.lineJoin = 'round';
+  for (let n = 1; n <= 9; n++) {
+    const x = (n - 0.5) * cell, y = cell / 2;
+    ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(4,7,13,0.92)'; ctx.strokeText('ПК' + n, x, y);
+    ctx.fillStyle = '#fff'; ctx.fillText('ПК' + n, x, y);
+  }
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.minFilter = THREE.LinearFilter; tex.generateMipmaps = false;
+  const list = DATA.ticks.pk, n = list.length;
+  const geo = new THREE.BufferGeometry();
+  const num = new Float32Array(n), col = new Float32Array(n * 3);
+  const cBase = new THREE.Color('#cfd8e8').multiplyScalar(0.8), cCalc = new THREE.Color('#ffc861').multiplyScalar(0.85);
+  list.forEach((t, i) => { num[i] = t[5] || 0; const c = t[4] ? cCalc : cBase; col.set([c.r, c.g, c.b], i * 3); });
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  geo.setAttribute('aNum', new THREE.BufferAttribute(num, 1));
+  geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTex: { value: tex }, uPR: { value: renderer.getPixelRatio() }, uSize: { value: 46 }, uOpacity: { value: 0 } },
+    transparent: true, depthWrite: false, depthTest: false,
+    vertexShader: `attribute float aNum; attribute vec3 aColor; varying float vNum; varying vec3 vC; uniform float uPR, uSize;
+      void main(){ vNum = aNum; vC = aColor; gl_PointSize = uSize * uPR; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform sampler2D uTex; uniform float uOpacity; varying float vNum; varying vec3 vC;
+      void main(){ if (vNum < 0.5) discard; vec4 t = texture2D(uTex, vec2((gl_PointCoord.x + vNum - 1.0) / 9.0, 1.0 - gl_PointCoord.y));
+        if (t.a < 0.02) discard; gl_FragColor = vec4(mix(vec3(0.016, 0.027, 0.05), vC, t.r), t.a * uOpacity); }`,
+  });
+  const pts = new THREE.Points(geo, mat); pts.frustumCulled = false; pts.renderOrder = 13; pts.visible = false; scene.add(pts);
+  return { pts, mat, list,
+    place() { // подпись — у конца штриха пикета, сбоку от пути
+      const a = geo.attributes.position.array;
+      list.forEach(([x, z, ang], i) => { const ox = x + Math.cos(ang) * 0.2, oz = z + Math.sin(ang) * 0.2; a[i * 3] = ox; a[i * 3 + 1] = yAt(ox, oz) + 0.05; a[i * 3 + 2] = oz; });
+      geo.attributes.position.needsUpdate = true;
+    } };
+})();
 function placeTicks(mesh) {
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
   mesh.userData.list.forEach(([x, z, a], i) => { p.set(x, yAt(x, z) + 0.02, z); q.setFromAxisAngle(up, -a); m.compose(p, q, s); mesh.setMatrixAt(i, m); });
@@ -359,7 +397,7 @@ for (const s of DATA.stations) {
   el.style.setProperty('--c', s.sec.color);
   el.innerHTML = '<span class="nm"></span><span class="ch"></span>';
   el.querySelector('.nm').textContent = s.border ? 'Сархад' : s.title;
-  el.querySelector('.ch').textContent = s.chain ? 'ПК ' + s.chain : '';
+  el.querySelector('.ch').textContent = s.chain ? kmText(s.chain) : '';
   el.addEventListener('click', (e) => { e.stopPropagation(); selectStation(s, true); });
   el.addEventListener('pointerenter', () => setHover(s));
   el.addEventListener('pointerleave', () => setHover(null));
@@ -376,7 +414,7 @@ function addBig(text, x, z, cls) {
 }
 for (const l of DATA.labels) addBig(l.t, l.x, l.z, l.k === 'country' ? 'geo-label country' : 'geo-label region');
 for (const f of DATA.foreignStations) addBig('→ ' + f.name + ' (' + f.country + ')', f.x, f.z, 'geo-label foreign');
-for (const r of DATA.realTracks || []) addBig('путь по OpenStreetMap · км-отметки по пикетажу', r.mid[0], r.mid[1], 'geo-label foreign calc');
+for (const r of DATA.realTracks || []) addBig('путь по OpenStreetMap · КМ и ПК рассчитаны', r.mid[0], r.mid[1], 'geo-label foreign calc');
 
 // ============================================================
 //  Поезда
@@ -425,7 +463,7 @@ function applyRelief() {
   for (const p of paths) refreshPathY(p);
   for (const s of DATA.stations) { s.pos.y = yAt(s.x, s.z); s.obj.g.position.copy(s.pos); s.label.obj.position.copy(s.pos); }
   for (const l of bigLabels) l.o.position.y = yAt(l.x, l.z) + (l.cls.includes('foreign') ? 0 : 1.5);
-  placeTicks(kmTicks); placeTicks(pkTicks);
+  placeTicks(kmTicks); placeTicks(pkTicks); pkLabels.place();
 }
 applyRelief();
 
@@ -468,7 +506,7 @@ function renderResults() {
     const b = document.createElement('button'); if (i === 0) b.className = 'active';
     b.innerHTML = `<i class="swatch" style="color:${s.border ? '#ff4d5e' : s.sec.color};width:14px"></i><span></span><small></small>`;
     b.querySelector('span').textContent = s.title;
-    b.querySelector('small').textContent = s.chain ? 'ПК ' + s.chain : '';
+    b.querySelector('small').textContent = s.chain ? kmText(s.chain) : '';
     b.addEventListener('click', () => { selectStation(s, true); results.classList.remove('open'); search.blur(); });
     results.appendChild(b);
   });
@@ -487,12 +525,12 @@ search.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape') { search.value = ''; results.classList.remove('open'); search.blur(); }
 });
 
-// расстояние между станциями: по пикетажу, если он согласуется с картой, иначе по карте
+// расстояние между станциями: по километражу, если он согласуется с картой, иначе по карте
 function distance(a, b) {
   const g = Math.abs(a.at - b.at);
   let best = null;
   for (const x of a.km || []) for (const y of b.km || []) { const d = Math.abs(x - y); if (d > g * 0.6 && d < g * 1.8 && (best == null || Math.abs(d - g) < Math.abs(best - g))) best = d; }
-  return best != null ? { km: best, how: 'по пикетажу' } : { km: g, how: '≈ по карте' };
+  return best != null ? { km: best, how: 'по километражу' } : { km: g, how: '≈ по карте' };
 }
 
 let selected = null;
@@ -511,14 +549,14 @@ function selectStation(s, fly) {
   if (s.border) badges.push(['red', 'Пограничный переход (Узбекистан)']);
   $('#cardBadges').innerHTML = badges.map(([c, t]) => `<span class="badge ${c}">${t}</span>`).join('');
   const facts = [];
-  if (s.chain) facts.push(['Пикетаж', s.chain.replace(' / ', ' · ')]);
+  if (s.chain) facts.push(['Километр', kmText(s.chain)]);
   if (s.note) facts.push(['Примечание', s.note]);
   facts.push(['Высота', s.elev + ' м над уровнем моря']);
   facts.push(['Участок', sec.name + ' (' + sec.region + ')']);
   if (s.junction) facts.push(['Примыкание', s.junction.map((id) => branchById[id].name).join('; ')]);
   if (!s.geo && !s.border) facts.push(['Положение', 'по чертежу (нет точных координат)']);
   for (const r of DATA.realTracks || []) if (s.name === r.from || (s.border && s.chain === r.toChain))
-    facts.push(['До Сархад', 'путь по OpenStreetMap (' + fmtKm(r.length) + '); км-отметки рассчитаны по пикетажу ' + r.chainFrom.toFixed(3).replace('.', '+') + ' → ' + r.toChain]);
+    facts.push(['До Сархад', 'путь по OpenStreetMap (' + fmtKm(r.length) + '); КМ и ПК рассчитаны от КМ ' + r.chainFrom.toFixed(3).replace('.', '+') + ' до КМ ' + r.toChain]);
   $('#cardFacts').innerHTML = facts.map(() => '<dt></dt><dd></dd>').join('');
   const dts = $('#cardFacts').querySelectorAll('dt'), dds = $('#cardFacts').querySelectorAll('dd');
   facts.forEach(([k, v], i) => { dts[i].textContent = k; dds[i].textContent = v; });
@@ -616,7 +654,7 @@ renderer.domElement.addEventListener('pointermove', (e) => {
   setHover(s);
   if (s) {
     tooltip.innerHTML = '<span></span><small></small>';
-    tooltip.firstChild.textContent = s.border ? 'Сархад' : s.title; tooltip.lastChild.textContent = s.chain ? 'ПК ' + s.chain : '';
+    tooltip.firstChild.textContent = s.border ? 'Сархад' : s.title; tooltip.lastChild.textContent = s.chain ? kmText(s.chain) : '';
     tooltip.style.left = e.clientX + 'px'; tooltip.style.top = e.clientY + 'px'; tooltip.classList.add('show');
   }
 });
@@ -777,8 +815,10 @@ function frame() {
   kmTicks.material.opacity = toggles.ticks ? kmTicks.userData.base * (1 - THREE.MathUtils.smoothstep(dist, 70, 140)) : 0;
   pkTicks.material.opacity = toggles.ticks ? pkTicks.userData.base * (1 - THREE.MathUtils.smoothstep(dist, 14, 30)) : 0;
   kmTicks.visible = kmTicks.material.opacity > 0.01; pkTicks.visible = pkTicks.material.opacity > 0.01;
+  pkLabels.mat.uniforms.uOpacity.value = toggles.ticks ? 1 - THREE.MathUtils.smoothstep(dist, 4.5, 7) : 0;
+  pkLabels.pts.visible = pkLabels.mat.uniforms.uOpacity.value > 0.01;
 
-  const sc = (markerSc = THREE.MathUtils.clamp(dist * 0.0085, 0.16, 3.2));
+  const sc = (markerSc = THREE.MathUtils.clamp(dist * 0.0085, 0.012, 3.2));
   for (const s of DATA.stations) {
     const o = s.obj, hov = s === hovered || s === selected;
     const appear = THREE.MathUtils.clamp((ie - (s.at / s.br.length) * 0.9) * 6, 0, 1);
