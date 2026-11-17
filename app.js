@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { MapControls } from 'three/addons/controls/MapControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -294,30 +296,32 @@ function pointAt(path, d, out) {
 // ============================================================
 //  Км-отметки и пикеты
 // ============================================================
-function buildTicks(list, w, len, opacity) {
-  const geo = new THREE.PlaneGeometry(len, w); geo.rotateX(-Math.PI / 2);
-  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity, depthWrite: false });
-  const mesh = new THREE.InstancedMesh(geo, mat, list.length);
-  const c = new THREE.Color();
+// штрихи — тонкие линии постоянной толщины на экране (не «плиты» при сильном приближении)
+function buildTicks(list, widthPx, len, opacity) {
+  const geo = new LineSegmentsGeometry();
+  const mat = new LineMaterial({ vertexColors: true, linewidth: widthPx, transparent: true, opacity, depthWrite: false });
+  lineMats.push(mat);
+  const cols = new Float32Array(list.length * 6), c = new THREE.Color();
   const calc = new THREE.Color('#ffc861'); // отметки, рассчитанные по километражу (на чертеже их нет)
-  list.forEach((t, i) => { if (t[4]) c.copy(calc); else c.copy(sectionById[t[3]].col).lerp(new THREE.Color(1, 1, 1), 0.55); mesh.setColorAt(i, c); });
-  mesh.renderOrder = 7; mesh.frustumCulled = false; mesh.userData = { base: opacity, list };
+  list.forEach((t, i) => { if (t[4]) c.copy(calc); else c.copy(sectionById[t[3]].col).lerp(new THREE.Color(1, 1, 1), 0.55); cols.set([c.r, c.g, c.b, c.r, c.g, c.b], i * 6); });
+  const mesh = new LineSegments2(geo, mat);
+  mesh.renderOrder = 7; mesh.frustumCulled = false; mesh.userData = { base: opacity, list, len, cols };
   scene.add(mesh); return mesh;
 }
-const kmTicks = buildTicks(DATA.ticks.km, 0.05, 0.42, 0.6);
-const pkTicks = buildTicks(DATA.ticks.pk, 0.022, 0.2, 0.5);
+const kmTicks = buildTicks(DATA.ticks.km, 2.6, 0.42, 0.75);
+const pkTicks = buildTicks(DATA.ticks.pk, 1.4, 0.2, 0.6);
 
 // Подписи пикетов ПК1…ПК9: одна текстура-атлас на все, рисуются точками (тысячи подписей без нагрузки на страницу)
 const pkLabels = (() => {
-  const cell = 64, cv = document.createElement('canvas'); cv.width = cell * 9; cv.height = cell;
+  const cell = 128, cv = document.createElement('canvas'); cv.width = cell * 9; cv.height = cell; // крупная ячейка — чётко при любом размере
   const ctx = cv.getContext('2d');
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '700 21px Inter, system-ui, sans-serif'; ctx.lineJoin = 'round';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '600 32px Inter, system-ui, sans-serif'; ctx.lineJoin = 'round';
   for (let n = 1; n <= 9; n++) {
     const x = (n - 0.5) * cell, y = cell / 2;
-    ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(4,7,13,0.92)'; ctx.strokeText('ПК' + n, x, y);
+    ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(4,7,13,0.92)'; ctx.strokeText('ПК' + n, x, y);
     ctx.fillStyle = '#fff'; ctx.fillText('ПК' + n, x, y);
   }
-  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.minFilter = THREE.LinearFilter; tex.generateMipmaps = false;
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.anisotropy = 4;
   const list = DATA.ticks.pk, n = list.length;
   const geo = new THREE.BufferGeometry();
   const num = new Float32Array(n), col = new Float32Array(n * 3);
@@ -327,26 +331,36 @@ const pkLabels = (() => {
   geo.setAttribute('aNum', new THREE.BufferAttribute(num, 1));
   geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
   const mat = new THREE.ShaderMaterial({
-    uniforms: { uTex: { value: tex }, uPR: { value: renderer.getPixelRatio() }, uSize: { value: 46 }, uOpacity: { value: 0 } },
+    // размер подписи привязан к местности (0,12 км), поэтому соседние ПК (через 100 м) не налезают друг на друга;
+    // слишком мелкие подписи плавно скрываются, слишком крупные ограничены
+    uniforms: { uTex: { value: tex }, uPR: { value: renderer.getPixelRatio() }, uWorld: { value: 0.12 }, uScale: { value: 1 },
+      uMinPx: { value: 30 }, uMaxPx: { value: 70 }, uOpacity: { value: 0 } },
     transparent: true, depthWrite: false, depthTest: false,
-    vertexShader: `attribute float aNum; attribute vec3 aColor; varying float vNum; varying vec3 vC; uniform float uPR, uSize;
-      void main(){ vNum = aNum; vC = aColor; gl_PointSize = uSize * uPR; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    vertexShader: `attribute float aNum; attribute vec3 aColor; varying float vNum, vA; varying vec3 vC; uniform float uPR, uWorld, uScale, uMinPx, uMaxPx;
+      void main(){ vNum = aNum; vC = aColor; vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float px = uWorld * uScale / max(-mv.z, 0.001);
+        vA = smoothstep(uMinPx, uMinPx + 12.0, px);
+        gl_PointSize = min(px, uMaxPx) * uPR; gl_Position = projectionMatrix * mv; }`,
     fragmentShader: `uniform sampler2D uTex; uniform float uOpacity; varying float vNum; varying vec3 vC;
-      void main(){ if (vNum < 0.5) discard; vec4 t = texture2D(uTex, vec2((gl_PointCoord.x + vNum - 1.0) / 9.0, 1.0 - gl_PointCoord.y));
-        if (t.a < 0.02) discard; gl_FragColor = vec4(mix(vec3(0.016, 0.027, 0.05), vC, t.r), t.a * uOpacity); }`,
+      varying float vA;
+      void main(){ if (vNum < 0.5 || vA < 0.01) discard; vec4 t = texture2D(uTex, vec2((gl_PointCoord.x + vNum - 1.0) / 9.0, 1.0 - gl_PointCoord.y));
+        if (t.a < 0.02) discard; gl_FragColor = vec4(mix(vec3(0.016, 0.027, 0.05), vC, t.r), t.a * uOpacity * vA); }`,
   });
   const pts = new THREE.Points(geo, mat); pts.frustumCulled = false; pts.renderOrder = 13; pts.visible = false; scene.add(pts);
   return { pts, mat, list,
     place() { // подпись — у конца штриха пикета, сбоку от пути
       const a = geo.attributes.position.array;
-      list.forEach(([x, z, ang], i) => { const ox = x + Math.cos(ang) * 0.2, oz = z + Math.sin(ang) * 0.2; a[i * 3] = ox; a[i * 3 + 1] = yAt(ox, oz) + 0.05; a[i * 3 + 2] = oz; });
+      list.forEach(([x, z, ang], i) => { const ox = x + Math.cos(ang) * 0.17, oz = z + Math.sin(ang) * 0.17; a[i * 3] = ox; a[i * 3 + 1] = yAt(ox, oz) + 0.05; a[i * 3 + 2] = oz; });
       geo.attributes.position.needsUpdate = true;
     } };
 })();
 function placeTicks(mesh) {
-  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
-  mesh.userData.list.forEach(([x, z, a], i) => { p.set(x, yAt(x, z) + 0.02, z); q.setFromAxisAngle(up, -a); m.compose(p, q, s); mesh.setMatrixAt(i, m); });
-  mesh.instanceMatrix.needsUpdate = true;
+  const { list, len, cols } = mesh.userData, h = len / 2, pos = new Float32Array(list.length * 6);
+  list.forEach(([x, z, a], i) => {
+    const dx = Math.cos(a) * h, dz = Math.sin(a) * h, y = yAt(x, z) + 0.02;
+    pos.set([x - dx, y, z - dz, x + dx, y, z + dz], i * 6);
+  });
+  mesh.geometry.setPositions(pos); mesh.geometry.setColors(cols);
 }
 
 // ============================================================
@@ -815,7 +829,8 @@ function frame() {
   kmTicks.material.opacity = toggles.ticks ? kmTicks.userData.base * (1 - THREE.MathUtils.smoothstep(dist, 70, 140)) : 0;
   pkTicks.material.opacity = toggles.ticks ? pkTicks.userData.base * (1 - THREE.MathUtils.smoothstep(dist, 14, 30)) : 0;
   kmTicks.visible = kmTicks.material.opacity > 0.01; pkTicks.visible = pkTicks.material.opacity > 0.01;
-  pkLabels.mat.uniforms.uOpacity.value = toggles.ticks ? 1 - THREE.MathUtils.smoothstep(dist, 4.5, 7) : 0;
+  pkLabels.mat.uniforms.uScale.value = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  pkLabels.mat.uniforms.uOpacity.value = toggles.ticks ? 1 - THREE.MathUtils.smoothstep(dist, 9, 14) : 0;
   pkLabels.pts.visible = pkLabels.mat.uniforms.uOpacity.value > 0.01;
 
   const sc = (markerSc = THREE.MathUtils.clamp(dist * 0.0085, 0.012, 3.2));
